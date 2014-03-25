@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,93 +15,72 @@ import (
 )
 
 type WriteOperation struct {
-	Database  string        `json:"d"`
-	ApiKey    string        `json:"a"`
-	Operation string        `json:"o,omitempty"`
-	Writes    []*JsonPoints `json:"w"`
+	Writes []*JsonPoints `json:"writes"`
 }
 
 type JsonPoint struct {
-	Value      float64           `json:"v"`
-	Context    string            `json:"c,omitempty"`
-	Time       int64             `json:"t,omitempty"`
-	Dimensions map[string]string `json:"d,omitempty"`
+	Value      float64           `json:"value"`
+	Context    string            `json:"context"`
+	Time       int64             `json:"time"`
+	Dimensions map[string]string `json:"dimensions"`
 }
 
 type JsonPoints struct {
-	Name   string       `json:"n"`
-	Points []*JsonPoint `json:"p"`
+	Name    string       `json:"name"`
+	Columns []string     `json:"columns"`
+	Points  []*JsonPoint `json:"points"`
 }
 
 type Dimensions map[string]string
 
-type PostType int
-
-const (
-	UDP PostType = iota
-	HTTP
-)
-
 var METRIC_REGEX, _ = regexp.Compile("^[a-zA-Z0-9._]*$")
-
-type ErrplanePost struct {
-	postType  PostType
-	operation *WriteOperation
-}
 
 type Errplane struct {
 	proto               string
-	udpConn             *net.UDPConn
 	url                 string
-	apiKey              string
-	database            string
 	Timeout             time.Duration
 	closeChan           chan bool
-	msgChan             chan *ErrplanePost
+	msgChan             chan *WriteOperation
 	closed              bool
 	timeout             time.Duration
 	runtimeStatsRunning bool
+	DBConfig            *InfluxDBConfig
 }
 
 const (
-	DEFAULT_HTTP_HOST = "w.apiv3.errplane.com"
-	DEFAULT_UDP_ADDR  = "udp.apiv3.errplane.com:8126"
+	DEFAULT_HTTP_HOST = "localhost:8086"
 )
 
-// Initializer.
-//   app: the application key from the Settings/Applications page
-//   environment: the environment from the Settings/Applications page
-//   apiKey: the api key from Settings/Orginzations page
-func New(app, environment, apiKey string) *Errplane {
-	return newCommon("https", app, environment, apiKey)
+type InfluxDBConfig struct {
+	Host     string
+	Database string
+	Username string
+	Password string
 }
 
-func newTestClient(app, environment, apiKey string) *Errplane {
-	return newCommon("http", app, environment, apiKey)
+func New(config *InfluxDBConfig) *Errplane {
+	return newCommon("http", config)
 }
 
-func newCommon(proto, app, environment, apiKey string) *Errplane {
-	database := fmt.Sprintf("%s%s", app, environment)
+func newCommon(proto string, dbConfig *InfluxDBConfig) *Errplane {
 	ep := &Errplane{
 		proto:     proto,
-		database:  database,
-		apiKey:    apiKey,
 		Timeout:   1 * time.Second,
-		msgChan:   make(chan *ErrplanePost),
+		msgChan:   make(chan *WriteOperation),
 		closeChan: make(chan bool),
 		closed:    false,
 		timeout:   2 * time.Second,
+		DBConfig:  dbConfig,
 	}
-	ep.SetHttpHost(DEFAULT_HTTP_HOST)
-	ep.SetUdpAddr(DEFAULT_UDP_ADDR)
-	ep.setTransporter(nil)
+	ep.SetHttpHost(dbConfig.Host)
+	// ep.setTransporter(nil)
 	go ep.processMessages()
 	return ep
 }
 
 // call from a goroutine, this method never returns
 func (self *Errplane) processMessages() {
-	posts := make([]*ErrplanePost, 0)
+	posts := make([]*WriteOperation, 0)
 	for {
 
 		select {
@@ -118,110 +98,26 @@ func (self *Errplane) processMessages() {
 			return
 		}
 
-		posts = make([]*ErrplanePost, 0)
+		posts = make([]*WriteOperation, 0)
 	}
 }
 
-func (self *Errplane) flushPosts(posts []*ErrplanePost) {
+func (self *Errplane) flushPosts(posts []*WriteOperation) {
 	if len(posts) == 0 {
 		return
 	}
 
-	var (
-		httpPoints         = make([]*WriteOperation, 0)
-		udpReportPoints    = make([]*WriteOperation, 0)
-		udpSumPoints       = make([]*WriteOperation, 0)
-		udpAggregatePoints = make([]*WriteOperation, 0)
-	)
-
-	for _, post := range posts {
-		operation := post.operation
-		if post.postType == UDP {
-			switch operation.Operation {
-			case "r":
-				udpReportPoints = append(udpReportPoints, operation)
-			case "t":
-				udpAggregatePoints = append(udpAggregatePoints, operation)
-			case "c":
-				udpSumPoints = append(udpSumPoints, operation)
-			default:
-				panic(fmt.Errorf("Unknown point type %s", operation.Operation))
-			}
-		} else {
-			httpPoints = append(httpPoints, operation)
-		}
-	}
+	buf, _ := json.MarshalIndent(posts, "", "  ")
+	fmt.Println("json:", string(buf))
 
 	// do the http ones first
-	httpPoint := self.mergeMetrics(httpPoints)
+	httpPoint := self.mergeMetrics(posts)
+
 	if httpPoint != nil {
 		if err := self.SendHttp(httpPoint); err != nil {
 			fmt.Fprintf(os.Stderr, "Error while posting points to Errplane. Error: %s\n", err)
 		}
 	}
-
-	// do the udp points here
-	udpReportPoint := self.mergeMetrics(udpReportPoints)
-	if udpReportPoint != nil {
-		udpReportPoint.Operation = "r"
-		if err := self.SendUdp(udpReportPoint); err != nil {
-			fmt.Fprintf(os.Stderr, "Error while posting points to Errplane. Error: %s\n", err)
-		}
-	}
-	udpAggregatePoint := self.mergeMetrics(udpAggregatePoints)
-	if udpAggregatePoint != nil {
-		udpAggregatePoint.Operation = "t"
-		if err := self.SendUdp(udpAggregatePoint); err != nil {
-			fmt.Fprintf(os.Stderr, "Error while posting points to Errplane. Error: %s\n", err)
-		}
-	}
-	udpSumPoint := self.mergeMetrics(udpSumPoints)
-	if udpSumPoint != nil {
-		udpSumPoint.Operation = "c"
-		if err := self.SendUdp(udpSumPoint); err != nil {
-			fmt.Fprintf(os.Stderr, "Error while posting points to Errplane. Error: %s\n", err)
-		}
-	}
-}
-
-func (self *Errplane) Heartbeat(name string, interval time.Duration, context string, dimensions Dimensions) {
-	go func() {
-		for {
-			if self.closed {
-				return
-			}
-
-			self.Report(name, 1.0, time.Now(), context, dimensions)
-			time.Sleep(interval)
-		}
-	}()
-}
-
-func (self *Errplane) SendHttp(data *WriteOperation) error {
-	buf, err := json.Marshal(data.Writes)
-	if err != nil {
-		return fmt.Errorf("Cannot marshal %#v. Error: %s", data, err)
-	}
-
-	resp, err := http.Post(self.url, "application/json", bytes.NewReader(buf))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 201 {
-		return fmt.Errorf("Server returned status code %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (self *Errplane) SendUdp(data *WriteOperation) error {
-	buf, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("Cannot marshal %#v. Error: %s", data, err)
-	}
-
-	_, err = self.udpConn.Write(buf)
-	return err
 }
 
 func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation {
@@ -242,16 +138,46 @@ func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation
 
 	for metric, points := range metricToPoints {
 		mergedMetrics = append(mergedMetrics, &JsonPoints{
-			Name:   metric,
-			Points: points,
+			Name:    metric,
+			Columns: []string{"value", "time", "dimensions"},
+			Points:  points,
 		})
 	}
 
 	return &WriteOperation{
-		Database: self.database,
-		ApiKey:   self.apiKey,
-		Writes:   mergedMetrics,
+		Writes: mergedMetrics,
 	}
+}
+
+func (self *Errplane) SendHttp(data *WriteOperation) error {
+	buf, err := json.MarshalIndent(data.Writes, "", "  ")
+	fmt.Println("after merge:\n", string(buf))
+	if err != nil {
+		return fmt.Errorf("Cannot marshal %#v. Error: %s", data, err)
+	}
+
+	// todo
+	// fmt.Println("json:", string(buf))
+	resp, err := http.Post(self.url, "application/json", bytes.NewReader(buf))
+	return responseToError(resp, err, true)
+}
+
+func responseToError(response *http.Response, err error, closeResponse bool) error {
+	if err != nil {
+		return err
+	}
+	if closeResponse {
+		defer response.Body.Close()
+	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		return nil
+	}
+	defer response.Body.Close()
+	body, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("Server returned (%d): %s", response.StatusCode, string(body))
 }
 
 // Close the errplane object and flush all buffered data points
@@ -263,30 +189,11 @@ func (self *Errplane) Close() {
 	<-self.closeChan
 }
 
-func (self *Errplane) SetUdpAddr(addr string) error {
-	localAddr, err := net.ResolveUDPAddr("udp4", "")
-	if err != nil {
-		return err
-	}
-	remoteAddr, err := net.ResolveUDPAddr("udp4", addr)
-	if err != nil {
-		return err
-	}
-	udpConn, err := net.DialUDP("udp4", localAddr, remoteAddr)
-	if err != nil {
-		return err
-	}
-	if self.udpConn != nil {
-		self.udpConn.Close()
-	}
-	self.udpConn = udpConn
-	return nil
-}
-
 func (self *Errplane) SetHttpHost(host string) {
 	params := url.Values{}
-	params.Set("api_key", self.apiKey)
-	self.url = fmt.Sprintf("%s://%s/databases/%s/points?%s", self.proto, host, self.database, params.Encode())
+	params.Set("u", self.DBConfig.Username)
+	params.Set("p", self.DBConfig.Password)
+	self.url = fmt.Sprintf("%s://%s/db/%s/series?%s", self.proto, host, self.DBConfig.Database, params.Encode())
 }
 
 func (self *Errplane) SetProxy(proxy string) error {
@@ -385,7 +292,7 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 			for i := 0; i < countGc; i++ {
 				idx := int((memStats.NumGC-uint32(i))+255) % 256
 				pause := float64(memStats.PauseNs[idx])
-				self.Aggregate(fmt.Sprintf("%s.memory.gc.pause", prefix), pause/nsInMs, context, dimensions)
+				self.Report(fmt.Sprintf("%s.memory.gc.pause", prefix), pause/nsInMs, now, context, dimensions)
 			}
 		}
 
@@ -399,14 +306,11 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 
 // FIXME: make timestamp, context and dimensions optional (accept empty values, e.g. nil)
 func (self *Errplane) Report(metric string, value float64, timestamp time.Time, context string, dimensions Dimensions) error {
-	return self.sendCommon("", metric, value, &timestamp, context, dimensions, HTTP)
+	return self.sendCommon(metric, value, &timestamp, context, dimensions)
 }
 
-func (self *Errplane) sendUdpPayload(metricType, metric string, value float64, context string, dimensions Dimensions) error {
-	return self.sendCommon(metricType, metric, value, nil, context, dimensions, UDP)
-}
-
-func (self *Errplane) sendCommon(metricType, metric string, value float64, timestamp *time.Time, context string, dimensions Dimensions, postType PostType) error {
+func (self *Errplane) sendCommon(metric string, value float64, timestamp *time.Time, context string, dimensions Dimensions) error {
+	fmt.Println(metric, value)
 	if err := verifyMetricName(metric); err != nil {
 		return err
 	}
@@ -421,28 +325,16 @@ func (self *Errplane) sendCommon(metricType, metric string, value float64, times
 	}
 
 	data := &WriteOperation{
-		Operation: metricType,
 		Writes: []*JsonPoints{
 			&JsonPoints{
-				Name:   metric,
-				Points: []*JsonPoint{point},
+				Name:    metric,
+				Columns: []string{"value", "time", "dimensions"},
+				Points:  []*JsonPoint{point},
 			},
 		},
 	}
-	self.msgChan <- &ErrplanePost{postType, data}
+	self.msgChan <- data
 	return nil
-}
-
-func (self *Errplane) ReportUDP(metric string, value float64, context string, dimensions Dimensions) error {
-	return self.sendUdpPayload("r", metric, value, context, dimensions)
-}
-
-func (self *Errplane) Aggregate(metric string, value float64, context string, dimensions Dimensions) error {
-	return self.sendUdpPayload("t", metric, value, context, dimensions)
-}
-
-func (self *Errplane) Sum(metric string, value float64, context string, dimensions Dimensions) error {
-	return self.sendUdpPayload("c", metric, float64(value), context, dimensions)
 }
 
 func verifyMetricName(name string) error {
