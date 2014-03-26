@@ -1,9 +1,8 @@
 package main
 
 import (
-	// "log"
 	"math/rand"
-	"os"
+  "log"
 	"runtime"
 	"time"
 
@@ -31,7 +30,7 @@ func doSomeJob(numRoutines int) {
 	for {
 		runtime.ReadMemStats(m)
 		// log.Printf("Alloc: %d MB", m.Alloc/1024/1024)
-		// log.Println("num goroutine:", runtime.NumGoroutine())
+		log.Println("num goroutine:", runtime.NumGoroutine())
 		for i := 0; i < numRoutines; i++ {
 			go allocateAndSum(rand.Intn(1024) * 1024)
 		}
@@ -43,8 +42,7 @@ func doSomeJob(numRoutines int) {
 
 func main() {
 
-	host, _ := os.Hostname()
-	goStatsReportInterval, _ := time.ParseDuration("1s")
+	goStatsReportInterval, _ := time.ParseDuration("5s")
 
 	config := &errplane.InfluxDBConfig{
 		Host:     "localhost:8086",
@@ -54,8 +52,7 @@ func main() {
 	}
 	ep := errplane.New(config)
 
-	ep.ReportRuntimeStats("runtime", "",
-		errplane.Dimensions{"host": host}, goStatsReportInterval)
+	ep.ReportRuntimeStats("runtime", goStatsReportInterval)
 
 	doSomeJob(20)
 }

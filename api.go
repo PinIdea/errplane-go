@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -18,20 +19,13 @@ type WriteOperation struct {
 	Writes []*JsonPoints `json:"writes"`
 }
 
-type JsonPoint struct {
-	Value      float64           `json:"value"`
-	Context    string            `json:"context"`
-	Time       int64             `json:"time"`
-	Dimensions map[string]string `json:"dimensions"`
-}
+type PointValues []interface{}
 
 type JsonPoints struct {
-	Name    string       `json:"name"`
-	Columns []string     `json:"columns"`
-	Points  []*JsonPoint `json:"points"`
+	Name    string        `json:"name"`
+	Columns []string      `json:"columns"`
+	Points  []PointValues `json:"points"`
 }
-
-type Dimensions map[string]string
 
 var METRIC_REGEX, _ = regexp.Compile("^[a-zA-Z0-9._]*$")
 
@@ -44,7 +38,7 @@ type Errplane struct {
 	closed              bool
 	timeout             time.Duration
 	runtimeStatsRunning bool
-	DBConfig            *InfluxDBConfig
+	dbConf              *InfluxDBConfig
 }
 
 const (
@@ -70,7 +64,7 @@ func newCommon(proto string, dbConfig *InfluxDBConfig) *Errplane {
 		closeChan: make(chan bool),
 		closed:    false,
 		timeout:   2 * time.Second,
-		DBConfig:  dbConfig,
+		dbConf:    dbConfig,
 	}
 	ep.SetHttpHost(dbConfig.Host)
 	// ep.setTransporter(nil)
@@ -107,9 +101,6 @@ func (self *Errplane) flushPosts(posts []*WriteOperation) {
 		return
 	}
 
-	buf, _ := json.MarshalIndent(posts, "", "  ")
-	fmt.Println("json:", string(buf))
-
 	// do the http ones first
 	httpPoint := self.mergeMetrics(posts)
 
@@ -125,7 +116,7 @@ func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation
 		return nil
 	}
 
-	metricToPoints := make(map[string][]*JsonPoint)
+	metricToPoints := make(map[string][]PointValues)
 
 	for _, operation := range operations {
 		for _, jsonPoints := range operation.Writes {
@@ -139,7 +130,7 @@ func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation
 	for metric, points := range metricToPoints {
 		mergedMetrics = append(mergedMetrics, &JsonPoints{
 			Name:    metric,
-			Columns: []string{"value", "time", "dimensions"},
+			Columns: []string{"value", "time"},
 			Points:  points,
 		})
 	}
@@ -151,13 +142,10 @@ func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation
 
 func (self *Errplane) SendHttp(data *WriteOperation) error {
 	buf, err := json.MarshalIndent(data.Writes, "", "  ")
-	fmt.Println("after merge:\n", string(buf))
 	if err != nil {
 		return fmt.Errorf("Cannot marshal %#v. Error: %s", data, err)
 	}
 
-	// todo
-	// fmt.Println("json:", string(buf))
 	resp, err := http.Post(self.url, "application/json", bytes.NewReader(buf))
 	return responseToError(resp, err, true)
 }
@@ -191,9 +179,9 @@ func (self *Errplane) Close() {
 
 func (self *Errplane) SetHttpHost(host string) {
 	params := url.Values{}
-	params.Set("u", self.DBConfig.Username)
-	params.Set("p", self.DBConfig.Password)
-	self.url = fmt.Sprintf("%s://%s/db/%s/series?%s", self.proto, host, self.DBConfig.Database, params.Encode())
+	params.Set("u", self.dbConf.Username)
+	params.Set("p", self.dbConf.Password)
+	self.url = fmt.Sprintf("%s://%s/db/%s/series?%s", self.proto, host, self.dbConf.Database, params.Encode())
 }
 
 func (self *Errplane) SetProxy(proxy string) error {
@@ -230,24 +218,22 @@ func (self *Errplane) setTransporter(proxyUrl *url.URL) {
 // Start a goroutine that will post runtime stats to errplane, stats include memory usage, garbage collection, number of goroutines, etc.
 // Args:
 //   prefix: the prefix to use in the metric name
-//   context: all points will be reported with the given context name
-//   dimensions: all points will be reported with the given dimensions
 //   sleep: the sampling frequency
-func (self *Errplane) ReportRuntimeStats(prefix, context string, dimensions Dimensions, sleep time.Duration) {
+func (self *Errplane) ReportRuntimeStats(prefix string, sleep time.Duration) {
 	if self.runtimeStatsRunning {
 		fmt.Fprintf(os.Stderr, "Runtime stats is already running\n")
 		return
 	}
 
 	self.runtimeStatsRunning = true
-	go self.reportRuntimeStats(prefix, context, dimensions, sleep)
+	go self.reportRuntimeStats(prefix, sleep)
 }
 
-func (self *Errplane) StopRuntimeStatsReporting(prefix, context string, dimensions Dimensions, sleep time.Duration) {
+func (self *Errplane) StopRuntimeStatsReporting() {
 	self.runtimeStatsRunning = false
 }
 
-func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dimensions, sleep time.Duration) {
+func (self *Errplane) reportRuntimeStats(prefix string, sleep time.Duration) {
 	memStats := &runtime.MemStats{}
 	lastSampleTime := time.Now()
 	var lastPauseNs uint64 = 0
@@ -260,18 +246,18 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 
 		now := time.Now()
 
-		self.Report(fmt.Sprintf("%s.goroutines", prefix), float64(runtime.NumGoroutine()), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.heap.objects", prefix), float64(memStats.HeapObjects), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.allocated", prefix), float64(memStats.Alloc), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.mallocs", prefix), float64(memStats.Mallocs), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.frees", prefix), float64(memStats.Frees), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.gc.total_pause", prefix), float64(memStats.PauseTotalNs)/nsInMs, now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.heap", prefix), float64(memStats.HeapAlloc), now, context, dimensions)
-		self.Report(fmt.Sprintf("%s.memory.stack", prefix), float64(memStats.StackInuse), now, context, dimensions)
+		self.Report(fmt.Sprintf("%s.goroutines", prefix), float64(runtime.NumGoroutine()), now)
+		self.Report(fmt.Sprintf("%s.memory.heap.objects", prefix), float64(memStats.HeapObjects), now)
+		self.Report(fmt.Sprintf("%s.memory.allocated", prefix), float64(memStats.Alloc), now)
+		self.Report(fmt.Sprintf("%s.memory.mallocs", prefix), float64(memStats.Mallocs), now)
+		self.Report(fmt.Sprintf("%s.memory.frees", prefix), float64(memStats.Frees), now)
+		self.Report(fmt.Sprintf("%s.memory.gc.total_pause", prefix), float64(memStats.PauseTotalNs)/nsInMs, now)
+		self.Report(fmt.Sprintf("%s.memory.heap", prefix), float64(memStats.HeapAlloc), now)
+		self.Report(fmt.Sprintf("%s.memory.stack", prefix), float64(memStats.StackInuse), now)
 
 		if lastPauseNs > 0 {
 			pauseSinceLastSample := memStats.PauseTotalNs - lastPauseNs
-			self.Report(fmt.Sprintf("%s.memory.gc.pause_per_second", prefix), float64(pauseSinceLastSample)/nsInMs/sleep.Seconds(), now, context, dimensions)
+			self.Report(fmt.Sprintf("%s.memory.gc.pause_per_second", prefix), float64(pauseSinceLastSample)/nsInMs/sleep.Seconds(), now)
 		}
 		lastPauseNs = memStats.PauseTotalNs
 
@@ -279,7 +265,7 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 		if lastNumGc > 0 {
 			diff := float64(countGc)
 			diffTime := now.Sub(lastSampleTime).Seconds()
-			self.Report(fmt.Sprintf("%s.memory.gc.gc_per_second", prefix), diff/diffTime, now, context, dimensions)
+			self.Report(fmt.Sprintf("%s.memory.gc.gc_per_second", prefix), diff/diffTime, now)
 		}
 
 		// get the individual pause times
@@ -292,7 +278,7 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 			for i := 0; i < countGc; i++ {
 				idx := int((memStats.NumGC-uint32(i))+255) % 256
 				pause := float64(memStats.PauseNs[idx])
-				self.Report(fmt.Sprintf("%s.memory.gc.pause", prefix), pause/nsInMs, now, context, dimensions)
+				self.Report(fmt.Sprintf("%s.memory.gc.pause", prefix), pause/nsInMs, now)
 			}
 		}
 
@@ -304,32 +290,28 @@ func (self *Errplane) reportRuntimeStats(prefix, context string, dimensions Dime
 	}
 }
 
-// FIXME: make timestamp, context and dimensions optional (accept empty values, e.g. nil)
-func (self *Errplane) Report(metric string, value float64, timestamp time.Time, context string, dimensions Dimensions) error {
-	return self.sendCommon(metric, value, &timestamp, context, dimensions)
+func (self *Errplane) Report(metric string, value float64, timestamp time.Time) error {
+	return self.sendCommon(metric, value, &timestamp)
 }
 
-func (self *Errplane) sendCommon(metric string, value float64, timestamp *time.Time, context string, dimensions Dimensions) error {
-	fmt.Println(metric, value)
+func (self *Errplane) sendCommon(metric string, value float64, timestamp *time.Time) error {
 	if err := verifyMetricName(metric); err != nil {
 		return err
 	}
-	point := &JsonPoint{
-		Value:      value,
-		Context:    context,
-		Dimensions: dimensions,
+
+	var now int64
+	if timestamp != nil {
+		now = time.Now().Unix()
 	}
 
-	if timestamp != nil {
-		point.Time = timestamp.Unix()
-	}
+	now = timestamp.Unix()
 
 	data := &WriteOperation{
 		Writes: []*JsonPoints{
 			&JsonPoints{
 				Name:    metric,
-				Columns: []string{"value", "time", "dimensions"},
-				Points:  []*JsonPoint{point},
+				Columns: []string{"value", "time"},
+				Points:  []PointValues{{value, now}},
 			},
 		},
 	}
@@ -347,4 +329,21 @@ func verifyMetricName(name string) error {
 	}
 
 	return nil
+}
+
+func validCharacter(ch rune) bool {
+	return ch >= 'a' && ch <= 'z' ||
+		ch >= 'A' && ch <= 'Z' ||
+		ch >= '0' && ch <= '9' ||
+		ch == '-' || ch == '_' ||
+		ch == '.'
+}
+
+func notValidCharacter(ch rune) bool {
+	return !validCharacter(ch)
+}
+
+func isValidMetricName(name string) bool {
+	return len(name) <= 255 &&
+		strings.IndexFunc(name, notValidCharacter) == -1
 }
