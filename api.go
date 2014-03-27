@@ -301,10 +301,10 @@ func (self *Errplane) sendCommon(metric string, value float64, timestamp *time.T
 
 	var now int64
 	if timestamp != nil {
-		now = time.Now().Unix()
+		now = getCurrentTime()
 	}
 
-	now = timestamp.Unix()
+	now = getCurrentTime()
 
 	data := &WriteOperation{
 		Writes: []*JsonPoints{
@@ -346,4 +346,8 @@ func notValidCharacter(ch rune) bool {
 func isValidMetricName(name string) bool {
 	return len(name) <= 255 &&
 		strings.IndexFunc(name, notValidCharacter) == -1
+}
+
+func getCurrentTime() int64 {
+	return time.Now().UnixNano() / 1000000
 }
