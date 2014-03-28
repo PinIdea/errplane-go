@@ -60,3 +60,7 @@ func main() {
 }
 
 ```
+
+[Grafana](https://github.com/torkelo/grafana) config example:
+
+https://gist.github.com/lidashuang/9826178
