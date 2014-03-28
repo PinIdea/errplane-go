@@ -14,10 +14,6 @@ import (
 	"time"
 )
 
-type WriteOperation struct {
-	Writes []*JsonPoints `json:"writes"`
-}
-
 type PointValues []interface{}
 
 type JsonPoints struct {
@@ -33,7 +29,7 @@ type Errplane struct {
 	url                 string
 	Timeout             time.Duration
 	closeChan           chan bool
-	msgChan             chan *WriteOperation
+	msgChan             chan *JsonPoints
 	closed              bool
 	timeout             time.Duration
 	runtimeStatsRunning bool
@@ -59,7 +55,7 @@ func newCommon(proto string, dbConfig *InfluxDBConfig) *Errplane {
 	ep := &Errplane{
 		proto:     proto,
 		Timeout:   1 * time.Second,
-		msgChan:   make(chan *WriteOperation),
+		msgChan:   make(chan *JsonPoints),
 		closeChan: make(chan bool),
 		closed:    false,
 		timeout:   2 * time.Second,
@@ -73,7 +69,7 @@ func newCommon(proto string, dbConfig *InfluxDBConfig) *Errplane {
 
 // call from a goroutine, this method never returns
 func (self *Errplane) processMessages() {
-	posts := make([]*WriteOperation, 0)
+	posts := make([]*JsonPoints, 0)
 	for {
 
 		select {
@@ -91,11 +87,11 @@ func (self *Errplane) processMessages() {
 			return
 		}
 
-		posts = make([]*WriteOperation, 0)
+		posts = make([]*JsonPoints, 0)
 	}
 }
 
-func (self *Errplane) flushPosts(posts []*WriteOperation) {
+func (self *Errplane) flushPosts(posts []*JsonPoints) {
 	if len(posts) == 0 {
 		return
 	}
@@ -110,37 +106,33 @@ func (self *Errplane) flushPosts(posts []*WriteOperation) {
 	}
 }
 
-func (self *Errplane) mergeMetrics(operations []*WriteOperation) *WriteOperation {
-	if len(operations) == 0 {
+func (self *Errplane) mergeMetrics(points []*JsonPoints) []*JsonPoints {
+	if len(points) == 0 {
 		return nil
 	}
 
 	metricToPoints := make(map[string][]PointValues)
 
-	for _, operation := range operations {
-		for _, jsonPoints := range operation.Writes {
-			name := jsonPoints.Name
-			metricToPoints[name] = append(metricToPoints[name], jsonPoints.Points...)
-		}
+	for _, jsonPoints := range points {
+		name := jsonPoints.Name
+		metricToPoints[name] = append(metricToPoints[name], jsonPoints.Points...)
 	}
 
 	mergedMetrics := make([]*JsonPoints, 0)
 
-	for metric, points := range metricToPoints {
+	for metric, pValues := range metricToPoints {
 		mergedMetrics = append(mergedMetrics, &JsonPoints{
 			Name:    metric,
 			Columns: []string{"value", "time"},
-			Points:  points,
+			Points:  pValues,
 		})
 	}
 
-	return &WriteOperation{
-		Writes: mergedMetrics,
-	}
+	return mergedMetrics
 }
 
-func (self *Errplane) SendHttp(data *WriteOperation) error {
-	buf, err := json.MarshalIndent(data.Writes, "", "  ")
+func (self *Errplane) SendHttp(data []*JsonPoints) error {
+	buf, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("Cannot marshal %#v. Error: %s", data, err)
 	}
@@ -274,14 +266,9 @@ func (self *Errplane) sendCommon(metric string, value float64, timestamp *time.T
 
 	now = getCurrentTime()
 
-	data := &WriteOperation{
-		Writes: []*JsonPoints{
-			&JsonPoints{
-				Name:    metric,
-				Columns: []string{"value", "time"},
-				Points:  []PointValues{{value, now}},
-			},
-		},
+	data := &JsonPoints{
+		Name:   metric,
+		Points: []PointValues{{value, now}},
 	}
 	self.msgChan <- data
 	return nil
