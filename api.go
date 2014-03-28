@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -182,37 +181,6 @@ func (self *Errplane) SetHttpHost(host string) {
 	params.Set("u", self.dbConf.Username)
 	params.Set("p", self.dbConf.Password)
 	self.url = fmt.Sprintf("%s://%s/db/%s/series?%s", self.proto, host, self.dbConf.Database, params.Encode())
-}
-
-func (self *Errplane) SetProxy(proxy string) error {
-	proxyUrl, err := url.Parse(proxy)
-	if err != nil {
-		return err
-	}
-	self.setTransporter(proxyUrl)
-	return nil
-}
-
-func (self *Errplane) SetTimeout(timeout time.Duration) error {
-	self.timeout = timeout
-	self.setTransporter(nil)
-	return nil
-}
-
-func (self *Errplane) setTransporter(proxyUrl *url.URL) {
-	transporter := &http.Transport{}
-	if proxyUrl != nil {
-		transporter.Proxy = http.ProxyURL(proxyUrl)
-	}
-	transporter.Dial = func(network, addr string) (net.Conn, error) {
-		conn, err := net.DialTimeout(network, addr, self.timeout)
-		if err != nil {
-			return nil, err
-		}
-		conn.SetDeadline(time.Now().Add(self.timeout))
-		return conn, nil
-	}
-	http.DefaultTransport = transporter
 }
 
 // Start a goroutine that will post runtime stats to errplane, stats include memory usage, garbage collection, number of goroutines, etc.
