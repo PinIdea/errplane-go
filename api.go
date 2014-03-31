@@ -10,7 +10,6 @@ import (
 	"os"
 	"regexp"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -284,23 +283,6 @@ func verifyMetricName(name string) error {
 	}
 
 	return nil
-}
-
-func validCharacter(ch rune) bool {
-	return ch >= 'a' && ch <= 'z' ||
-		ch >= 'A' && ch <= 'Z' ||
-		ch >= '0' && ch <= '9' ||
-		ch == '-' || ch == '_' ||
-		ch == '.'
-}
-
-func notValidCharacter(ch rune) bool {
-	return !validCharacter(ch)
-}
-
-func isValidMetricName(name string) bool {
-	return len(name) <= 255 &&
-		strings.IndexFunc(name, notValidCharacter) == -1
 }
 
 func getCurrentTime() int64 {

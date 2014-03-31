@@ -43,7 +43,8 @@ func doSomeJob(numRoutines int) {
 }
 
 func main() {
-
+	
+	// package usage 
 	goStatsReportInterval, _ := time.ParseDuration("3s")
 
 	config := &errplane.InfluxDBConfig{
@@ -56,6 +57,7 @@ func main() {
 
 	ep.ReportRuntimeStats("runtime", goStatsReportInterval)
 
+	// demo 
 	doSomeJob(20)
 }
 
