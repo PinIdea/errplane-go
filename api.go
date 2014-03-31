@@ -137,19 +137,18 @@ func (self *Errplane) SendHttp(data []*JsonPoints) error {
 	}
 
 	resp, err := http.Post(self.url, "application/json", bytes.NewReader(buf))
-	return responseToError(resp, err, true)
-}
-
-func responseToError(response *http.Response, err error, closeResponse bool) error {
 	if err != nil {
+		resp.Body.Close()
 		return err
 	}
-	if closeResponse {
-		defer response.Body.Close()
-	}
+	return responseToError(resp)
+}
+
+func responseToError(response *http.Response) error {
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		return nil
 	}
+
 	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
