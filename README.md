@@ -1,5 +1,15 @@
 # Usage
 
+
+监控Golang运行信息，存储到[influxdb](http://influxdb.org/)，现在使用的是Http协议。
+
+influxdb数据可以使用 [Grafana](https://github.com/torkelo/grafana) 展示
+
+config example:
+
+https://gist.github.com/lidashuang/9826178
+
+
 example:
 
 ```go
@@ -62,7 +72,3 @@ func main() {
 }
 
 ```
-
-[Grafana](https://github.com/torkelo/grafana) config example:
-
-https://gist.github.com/lidashuang/9826178
